@@ -63,11 +63,13 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$(uname -m)" == arm64 ]]
-          brew install llvm lld cmake ninja pkg-config
-          llvm_prefix=$(brew --prefix llvm)
+          rustup show active-toolchain
+          llvm_major=$(rustc -vV | sed -n 's/^LLVM version: \([0-9]*\).*/\1/p')
+          test -n "$llvm_major"
+          brew install "llvm@$llvm_major" lld cmake ninja pkg-config
+          llvm_prefix=$(brew --prefix "llvm@$llvm_major")
           lld_path="$(brew --prefix lld)/bin/ld64.lld"
           test -x "$lld_path"
-          rustup show active-toolchain
           rustup target add aarch64-apple-darwin
           rustc --print target-cpus --target aarch64-apple-darwin | grep -Eq '^[[:space:]]*apple-m5([[:space:]]|$)'
           printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/m5-probe.c"
