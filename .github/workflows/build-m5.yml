@@ -131,7 +131,7 @@ jobs:
 
       - name: Build and package
         env:
-          RUSTFLAGS: -C target-cpu=apple-m5
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: -C target-cpu=apple-m5
           CFLAGS: -O3 -flto -mcpu=apple-m5
           CXXFLAGS: -O3 -flto -mcpu=apple-m5
           CARGO_PROFILE_RELEASE_LTO: fat
