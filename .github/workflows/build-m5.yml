@@ -73,7 +73,7 @@ jobs:
           rustup target add aarch64-apple-darwin
           rustc --print target-cpus --target aarch64-apple-darwin | grep -Eq '^[[:space:]]*apple-m5([[:space:]]|$)'
           printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/m5-probe.c"
-          "$llvm_prefix/bin/clang" -mcpu=apple-m5 -flto=thin "-fuse-ld=$lld_path" "$RUNNER_TEMP/m5-probe.c" -o "$RUNNER_TEMP/m5-probe"
+          "$llvm_prefix/bin/clang" -O3 -mcpu=apple-m5 "-fuse-ld=$lld_path" "$RUNNER_TEMP/m5-probe.c" -o "$RUNNER_TEMP/m5-probe"
           {
             echo "CC=$llvm_prefix/bin/clang"
             echo "CXX=$llvm_prefix/bin/clang++"
@@ -132,11 +132,12 @@ jobs:
       - name: Build and package
         env:
           RUSTFLAGS: -C target-cpu=apple-m5
-          CFLAGS: -O3 -flto=thin -mcpu=apple-m5
-          CXXFLAGS: -O3 -flto=thin -mcpu=apple-m5
+          CFLAGS: -O3 -mcpu=apple-m5
+          CXXFLAGS: -O3 -mcpu=apple-m5
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1'
           CARGO_PROFILE_RELEASE_PANIC: abort
+          CARGO_PROFILE_RELEASE_STRIP: symbols
           CARGO_PROFILE_RELEASE_OPT_LEVEL: '3'
         shell: bash
         run: |
@@ -173,7 +174,7 @@ jobs:
           {
             echo "Apple M5 build of zed-industries/zed $UPSTREAM_TAG."
             echo "Upstream commit: $(git rev-parse HEAD)"
-            echo 'Rust Fat LTO; C/C++ Thin LTO; runtime Metal shaders; native ICNS icon.'
+            echo 'Rust Fat LTO; C/C++ native machine code; runtime Metal shaders; native ICNS icon.'
             echo 'Ad-hoc signed. Apple notarization is not configured.'
             echo 'In-app updates still use the upstream service; install these fork releases manually.'
           } > "$RUNNER_TEMP/release-notes.md"
