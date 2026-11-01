@@ -132,8 +132,8 @@ jobs:
       - name: Build and package
         env:
           RUSTFLAGS: -C target-cpu=apple-m5
-          CFLAGS: -O3 -mcpu=apple-m5
-          CXXFLAGS: -O3 -mcpu=apple-m5
+          CFLAGS: -O3 -flto -mcpu=apple-m5
+          CXXFLAGS: -O3 -flto -mcpu=apple-m5
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1'
           CARGO_PROFILE_RELEASE_PANIC: abort
@@ -174,7 +174,7 @@ jobs:
           {
             echo "Apple M5 build of zed-industries/zed $UPSTREAM_TAG."
             echo "Upstream commit: $(git rev-parse HEAD)"
-            echo 'Rust Fat LTO; C/C++ native machine code; runtime Metal shaders; native ICNS icon.'
+            echo 'Rust Fat LTO; C/C++ Fat LTO (Full Cross-Language LTO); runtime Metal shaders; native ICNS icon.'
             echo 'Ad-hoc signed. Apple notarization is not configured.'
             echo 'In-app updates still use the upstream service; install these fork releases manually.'
           } > "$RUNNER_TEMP/release-notes.md"
