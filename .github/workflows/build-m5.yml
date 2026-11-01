@@ -1,0 +1,181 @@
+name: Build M5 Extreme
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/build-m5.yml]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      upstream_tag:
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: m5-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'TR0MXI/zed'
+    runs-on: macos-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Resolve stable upstream release
+        id: upstream
+        env:
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            endpoint="repos/zed-industries/zed/releases/tags/$REQUESTED_TAG"
+          else
+            endpoint="repos/zed-industries/zed/releases/latest"
+          fi
+          gh api "$endpoint" > "$RUNNER_TEMP/upstream.json"
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          release = json.loads(Path(os.environ['RUNNER_TEMP'], 'upstream.json').read_text())
+          tag = release['tag_name']
+          assert not release['draft'] and not release['prerelease'], 'Expected a stable release'
+          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag), tag
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'tag={tag}\n')
+          PY
+
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-industries/zed
+          ref: refs/tags/${{ steps.upstream.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install build tools and check M5 support
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          brew install llvm cmake ninja pkg-config
+          llvm_prefix=$(brew --prefix llvm)
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin
+          rustc --print target-cpus --target aarch64-apple-darwin | grep -Eq '^[[:space:]]*apple-m5([[:space:]]|$)'
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/m5-probe.c"
+          "$llvm_prefix/bin/clang" -mcpu=apple-m5 -flto=thin -fuse-ld=lld "$RUNNER_TEMP/m5-probe.c" -o "$RUNNER_TEMP/m5-probe"
+          {
+            echo "CC=$llvm_prefix/bin/clang"
+            echo "CXX=$llvm_prefix/bin/clang++"
+            echo "AR=$llvm_prefix/bin/llvm-ar"
+            echo "LIBCLANG_PATH=$llvm_prefix/lib"
+            echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)"
+            echo "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=$RUNNER_TEMP/m5-linker"
+          } >> "$GITHUB_ENV"
+          printf '#!/bin/bash\nexec "%s/bin/clang" -fuse-ld=lld "$@"\n' "$llvm_prefix" > "$RUNNER_TEMP/m5-linker"
+          chmod +x "$RUNNER_TEMP/m5-linker"
+          cargo install cargo-bundle --git https://github.com/zed-industries/cargo-bundle.git --branch zed-deploy --locked
+          about_version=$(sed -n 's/^CARGO_ABOUT_VERSION="\([^"]*\)"/\1/p' script/generate-licenses)
+          test -n "$about_version"
+          cargo install cargo-about --version "$about_version" --locked
+
+      - name: Prepare native icon and bundle configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          iconset="$RUNNER_TEMP/zed.iconset"
+          mkdir -p "$iconset"
+          source_icon=crates/zed/resources/app-icon@2x.png
+          for size in 16 32 128 256 512; do
+            sips -z "$size" "$size" "$source_icon" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+            retina=$((size * 2))
+            sips -z "$retina" "$retina" "$source_icon" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil --convert icns --output "$RUNNER_TEMP/zed.icns" "$iconset"
+          iconutil --convert iconset --output "$RUNNER_TEMP/verified.iconset" "$RUNNER_TEMP/zed.icns"
+          test -s "$RUNNER_TEMP/verified.iconset/icon_512x512@2x.png"
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+
+          manifest = tomllib.loads(Path('crates/gpui_platform/Cargo.toml').read_text())
+          assert 'runtime_shaders' in manifest['features'], 'Upstream runtime_shaders feature changed'
+          path = Path('script/bundle-mac')
+          script = path.read_text()
+          replacements = {
+              'zed_features=""': 'zed_features="--features gpui_platform/runtime_shaders"',
+              'export CXXFLAGS="-stdlib=libc++"': 'export CXXFLAGS="${CXXFLAGS:-} -stdlib=libc++"',
+              'echo "Bundled ${app_path}"': '''echo "Bundled ${app_path}"
+          cp "$RUNNER_TEMP/zed.icns" "${app_path}/Contents/Resources/zed.icns"
+          /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconFile' "${app_path}/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string zed' "${app_path}/Contents/Info.plist"
+          plutil -lint "${app_path}/Contents/Info.plist"''',
+          }
+          for original, replacement in replacements.items():
+              assert script.count(original) == 1, f'Upstream bundle script changed: {original}'
+              script = script.replace(original, replacement)
+          path.write_text(script)
+          assert Path('crates/zed/RELEASE_CHANNEL').read_text().strip() == 'stable'
+          PY
+          bash -n script/bundle-mac
+
+      - name: Build and package
+        env:
+          RUSTFLAGS: -C target-cpu=apple-m5
+          CFLAGS: -O3 -flto=thin -mcpu=apple-m5
+          CXXFLAGS: -O3 -flto=thin -mcpu=apple-m5
+          CARGO_PROFILE_RELEASE_LTO: fat
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1'
+          CARGO_PROFILE_RELEASE_PANIC: abort
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: '3'
+        shell: bash
+        run: |
+          set -euo pipefail
+          script/bundle-mac aarch64-apple-darwin
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/Zed-aarch64.dmg dist/Zed-M5-Extreme.dmg
+          hdiutil verify dist/Zed-M5-Extreme.dmg
+          mount_point="$RUNNER_TEMP/m5-dmg"
+          mkdir -p "$mount_point"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" dist/Zed-M5-Extreme.dmg
+          trap 'hdiutil detach "$mount_point"' EXIT
+          app="$mount_point/Zed.app"
+          test -x "$app/Contents/MacOS/zed"
+          test -x "$app/Contents/MacOS/cli"
+          test -s "$app/Contents/Resources/zed.icns"
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist")" == zed ]]
+          codesign --verify --deep --strict "$app"
+          shasum -a 256 dist/Zed-M5-Extreme.dmg > dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zed-M5-Extreme
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish release
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GH_REPO/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags"
+          {
+            echo "Apple M5 build of zed-industries/zed $UPSTREAM_TAG."
+            echo "Upstream commit: $(git rev-parse HEAD)"
+            echo 'Rust Fat LTO; C/C++ Thin LTO; runtime Metal shaders; native ICNS icon.'
+            echo 'Ad-hoc signed. Apple notarization is not configured.'
+            echo 'In-app updates still use the upstream service; install these fork releases manually.'
+          } > "$RUNNER_TEMP/release-notes.md"
+          if ! grep -Fxq "$UPSTREAM_TAG" "$RUNNER_TEMP/release-tags"; then
+            gh release create "$UPSTREAM_TAG" --target "$GITHUB_SHA" --draft \
+              --title "Zed M5 Extreme $UPSTREAM_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+          gh release upload "$UPSTREAM_TAG" dist/Zed-M5-Extreme.dmg dist/SHA256SUMS --clobber
+          gh release edit "$UPSTREAM_TAG" --draft=false --latest --notes-file "$RUNNER_TEMP/release-notes.md"
